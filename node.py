@@ -1,21 +1,24 @@
 from peer_table import PeerTable, Peer
 from network_manager import NetworkManager
 from file_manager import FileManager
+from dht_manager import DHTManager
 import protocol
 import uuid
 
 class Node: 
     
-    def __init__(self, node_id, host, port, shared_folder):
+    def __init__(self, node_id, host, port, shared_folder, enable_peer_sync=True):
         self.node_id = node_id
         self.host = host
         self.port = int(port)
         self.shared_folder = shared_folder
+        self.enable_peer_sync = enable_peer_sync
     
         self.running = False
         self.peer_table = PeerTable()
         self.network_manager = NetworkManager(self)
         self.file_manager = FileManager(shared_folder)
+        self.dht_manager = DHTManager(self)
         self.seen_requests = set()
 
         self.search_results = {}
@@ -26,6 +29,7 @@ class Node:
         print(f'Starting Node {self.node_id}')
         self.network_manager.start()
         self.file_manager.scan_files()
+        self.publish_local_files()
 
     def stop(self):
         self.running = False
@@ -47,6 +51,9 @@ class Node:
         
         peers = response["payload"]["peers"]
         self.peer_table.join_table(peers, self_node_id=self.node_id)
+        if self.enable_peer_sync:
+            self.sync_with_known_peers(skip_node_id=response["sender_id"])
+        self.publish_local_files()
 
         print(
         f"[{self.node_id}] JOIN successful with "
@@ -86,6 +93,12 @@ class Node:
         
         if message["type"] == protocol.MSG_SEARCH_REPLY:
             return self.handle_search_reply(message)
+
+        if message["type"] == protocol.MSG_DHT_PUT:
+            return self.handle_dht_put(message)
+
+        if message["type"] == protocol.MSG_DHT_GET:
+            return self.handle_dht_get(message)
         
         return protocol.create_error(self, "Unknown message type")
     
@@ -97,6 +110,8 @@ class Node:
             )
         new_peer.mark_seen()
         self.peer_table.add_peer(new_peer)
+        self.publish_local_files()
+
         peers = self.peer_table.to_list()
         peers.append({
             "node_id": self.node_id,
@@ -118,6 +133,7 @@ class Node:
             "shared_folder": self.shared_folder,
             "running": self.running,
             "known_peers": self.peer_table.count(),
+            "chord_id": self.dht_manager.get_node_key(),
         }
     
     def search(self, filename, ttl=3):
@@ -391,5 +407,270 @@ class Node:
         print(f"[{self.node_id}] Hash verified: {downloaded_hash}")
 
         return True
+
+    def sync_with_known_peers(self, skip_node_id=None):
+        peers = list(self.peer_table.get_all_peers())
+
+        for peer in peers:
+            if peer.node_id == self.node_id:
+                continue
+
+            if skip_node_id is not None and peer.node_id == skip_node_id:
+                continue
+
+            try:
+                response = self.network_manager.send_request(
+                    peer.host,
+                    peer.port,
+                    protocol.create_join(self),
+                    expect_response=True
+                )
+            except Exception as error:
+                print(
+                    f"[{self.node_id}] peer sync failed with "
+                    f"{peer.node_id}: {error}"
+                )
+                continue
+
+            if response is None:
+                continue
+
+            if response["type"] != protocol.MSG_JOIN_REPLY:
+                continue
+
+            self.peer_table.join_table(
+                response["payload"]["peers"],
+                self_node_id=self.node_id
+            )
+
+    def build_local_provider(self, file_info):
+        return {
+            "node_id": self.node_id,
+            "host": self.host,
+            "port": self.port,
+            "file": {
+                "filename": file_info["filename"],
+                "size": file_info["size"],
+                "hash": file_info["hash"],
+            },
+        }
+
+    def publish_local_files(self):
+        files = self.file_manager.list_files()
+
+        if not files:
+            return
+
+        for file_info in files:
+            self.publish_file(file_info)
+
+    def publish_file(self, file_info):
+        filename = file_info["filename"]
+        file_key = self.dht_manager.get_file_key(filename)
+        successor = self.dht_manager.find_successor(file_key)
+        provider = self.build_local_provider(file_info)
+
+        if successor["node_id"] == self.node_id:
+            self.dht_manager.add_provider(filename, provider)
+            print(
+                f"[{self.node_id}] DHT stored local metadata for "
+                f"{filename}"
+            )
+            return True
+
+        message = protocol.create_dht_put(
+            self,
+            filename,
+            file_key,
+            provider
+        )
+
+        try:
+            response = self.network_manager.send_request(
+                successor["host"],
+                successor["port"],
+                message,
+                expect_response=True
+            )
+        except Exception as error:
+            print(
+                f"[{self.node_id}] DHT publish failed for {filename} "
+                f"to {successor['node_id']}: {error}"
+            )
+            return False
+
+        if response is None:
+            return False
+
+        if response["type"] != protocol.MSG_DHT_PUT_REPLY:
+            print(f"[{self.node_id}] unexpected DHT publish response: {response}")
+            return False
+
+        stored = response["payload"].get("stored", False)
+
+        if stored:
+            print(
+                f"[{self.node_id}] DHT published {filename} "
+                f"to {successor['node_id']}"
+            )
+            return True
+
+        print(
+            f"[{self.node_id}] DHT publish rejected for {filename}: "
+            f"{response['payload'].get('reason')}"
+        )
+        return False
+
+    def handle_dht_put(self, message):
+        payload = message["payload"]
+
+        filename = payload.get("filename")
+        provider = payload.get("provider")
+
+        if filename is None:
+            return protocol.create_dht_put_reply(
+                self,
+                filename,
+                stored=False,
+                reason="Missing filename"
+            )
+
+        if provider is None:
+            return protocol.create_dht_put_reply(
+                self,
+                filename,
+                stored=False,
+                reason="Missing provider"
+            )
+
+        self.dht_manager.add_provider(filename, provider)
+
+        print(
+            f"[{self.node_id}] DHT stored metadata for {filename} "
+            f"from {provider['node_id']}"
+        )
+
+        return protocol.create_dht_put_reply(self, filename, stored=True)
+
+    def dht_search(self, filename):
+        request_id = str(uuid.uuid4())
+        file_key = self.dht_manager.get_file_key(filename)
+        successor = self.dht_manager.find_successor(file_key)
+
+        print(
+            f"[{self.node_id}] DHT search for {filename} "
+            f"request_id={request_id} responsible={successor['node_id']}"
+        )
+
+        if successor["node_id"] == self.node_id:
+            providers = self.dht_manager.get_providers(filename)
+        else:
+            message = protocol.create_dht_get(
+                self,
+                filename,
+                file_key,
+                request_id
+            )
+
+            try:
+                response = self.network_manager.send_request(
+                    successor["host"],
+                    successor["port"],
+                    message,
+                    expect_response=True
+                )
+            except Exception as error:
+                print(
+                    f"[{self.node_id}] DHT search failed with "
+                    f"{successor['node_id']}: {error}"
+                )
+                return None
+
+            if response is None:
+                print(f"[{self.node_id}] DHT search failed: no response")
+                return None
+
+            if response["type"] != protocol.MSG_DHT_GET_REPLY:
+                print(f"[{self.node_id}] unexpected DHT search response: {response}")
+                return None
+
+            providers = response["payload"].get("providers", [])
+
+        self.search_results[request_id] = []
+
+        for provider in providers:
+            result = {
+                "node_id": provider["node_id"],
+                "host": provider["host"],
+                "port": provider["port"],
+                "file": provider["file"],
+            }
+            self.search_results[request_id].append(result)
+
+        if not providers:
+            print(f"[{self.node_id}] DHT search found no providers")
+            return request_id
+
+        for index, provider in enumerate(providers):
+            file_info = provider["file"]
+            print(
+                f"\n[{self.node_id}] DHT SEARCH RESULT "
+                f"request_id={request_id}\n"
+                f"  index: {index}\n"
+                f"  from: {provider['node_id']} "
+                f"{provider['host']}:{provider['port']}\n"
+                f"  file: {file_info['filename']}\n"
+                f"  size: {file_info['size']}\n"
+                f"  hash: {file_info['hash']}\n"
+            )
+
+        return request_id
+
+    def handle_dht_get(self, message):
+        payload = message["payload"]
+
+        filename = payload.get("filename")
+        request_id = payload.get("request_id")
+
+        if filename is None:
+            return protocol.create_error(self, "Missing filename")
+
+        if request_id is None:
+            return protocol.create_error(self, "Missing request_id")
+
+        providers = self.dht_manager.get_providers(filename)
+
+        print(
+            f"[{self.node_id}] DHT GET {filename} "
+            f"from {message['sender_id']} providers={len(providers)}"
+        )
+
+        return protocol.create_dht_get_reply(
+            self,
+            filename,
+            request_id,
+            providers
+        )
+
+    def show_dht_index(self):
+        rows = self.dht_manager.to_list()
+
+        print("\n--- DHT INDEX ---")
+
+        if not rows:
+            print("Nessun metadato DHT locale.")
+        else:
+            for row in rows:
+                print(f"{row['filename']} key={row['key']}")
+
+                for provider in row["providers"]:
+                    file_info = provider["file"]
+                    print(
+                        f"  provider={provider['node_id']} "
+                        f"{provider['host']}:{provider['port']} "
+                        f"hash={file_info['hash']}"
+                    )
+
+        print("-----------------\n")
     
     

@@ -1,4 +1,5 @@
 import argparse
+import time
 from node import Node
 
 
@@ -29,6 +30,9 @@ Comandi disponibili:
   peers
       Mostra i peer conosciuti.
 
+  files
+      Mostra i file locali condivisi.
+
   ping <host> <port>
       Manda un PING a un peer.
 
@@ -37,6 +41,12 @@ Comandi disponibili:
  
   search <filename>
       Esegue una ricerca con metodo Flooding per trovare un file nei peers.
+
+  dht_search <filename>
+      Esegue una ricerca con Chord semplificato.
+
+  dht_index
+      Mostra i metadati DHT salvati localmente da questo nodo.
   
   results
       Restituisce i risultati delle ricerce precedenti.
@@ -141,6 +151,17 @@ def cli_loop(node):
                 filename = parts[1]
                 node.search(filename)
 
+            elif cmd == "dht_search":
+                if len(parts) != 2:
+                    print("Uso: dht_search <filename>")
+                    continue
+
+                filename = parts[1]
+                node.dht_search(filename)
+
+            elif cmd == "dht_index":
+                node.show_dht_index()
+
             elif cmd == "results":
                 node.show_search_results()
             
@@ -175,6 +196,14 @@ def cli_loop(node):
             print(f"Errore: {error}")
 
 
+def wait_loop(node):
+    try:
+        while node.running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        node.stop()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Simple P2P node"
@@ -205,6 +234,18 @@ def main():
         help="Nodo bootstrap nel formato host:port"
     )
 
+    parser.add_argument(
+        "--no-peer-sync",
+        action="store_true",
+        help="Disabilita la sincronizzazione extra dei peer dopo il JOIN"
+    )
+
+    parser.add_argument(
+        "--no-cli",
+        action="store_true",
+        help="Avvia il nodo senza CLI interattiva"
+    )
+
     args = parser.parse_args()
 
     node_id = f"node_{args.port}"
@@ -213,7 +254,8 @@ def main():
         node_id=node_id,
         host=args.host,
         port=args.port,
-        shared_folder=args.shared
+        shared_folder=args.shared,
+        enable_peer_sync=not args.no_peer_sync
     )
 
     node.start()
@@ -227,7 +269,10 @@ def main():
         )
         node.join(bootstrap_host, bootstrap_port)
 
-    cli_loop(node)
+    if args.no_cli:
+        wait_loop(node)
+    else:
+        cli_loop(node)
 
 
 if __name__ == "__main__":
