@@ -2,7 +2,7 @@
 
 Progetto Python per sistemi distribuiti: una piccola rete peer-to-peer in cui ogni nodo condivide file, scopre altri peer, cerca file e li scarica via TCP.
 
-Il branch `dht-search` aggiunge una ricerca basata su **Chord** tramite Distributed Hash Table (DHT).
+Il branch `dht-search` aggiunge una ricerca basata su **Chord** seplificato tramite Distributed Hash Table (DHT).
 
 ## Funzionalita
 
@@ -62,7 +62,7 @@ download <request_id> <index>
 exit
 ```
 
-`search` usa il flooding, mentre `dht_search` usa Chord.
+`search` usa il flooding, mentre `dht_search` usa Chord semplificato.
 
 ## Rete di test
 
@@ -95,3 +95,7 @@ Per entrare nella rete con un nodo manuale:
 ```bash
 python main.py --port 9010 --shared runtime/dht_network/manual/shared --bootstrap 127.0.0.1:9001 --no-peer-sync
 ```
+
+## Note Finali
+
+In questa implementazione il nodo costruisce l’anello usando i peer che conosce localmente. Quindi, se la rete è molto sparsa e un nodo non conosce il vero responsabile globale, può calcolare un successore diverso. 
