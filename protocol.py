@@ -9,6 +9,10 @@ MSG_SEARCH = "SEARCH"
 MSG_SEARCH_REPLY = "SEARCH_REPLY"
 MSG_DOWNLOAD_REQUEST = "DOWNLOAD_REQUEST"
 MSG_DOWNLOAD_HEADER = "DOWNLOAD_HEADER"
+MSG_DHT_PUT = "DHT_PUT"
+MSG_DHT_PUT_REPLY = "DHT_PUT_REPLY"
+MSG_DHT_GET = "DHT_GET"
+MSG_DHT_GET_REPLY = "DHT_GET_REPLY"
 
 REQUIRED_FIELDS = {
     "type",
@@ -149,4 +153,52 @@ def create_download_header(node, status, filename=None, file_size=0, file_hash=N
         MSG_DOWNLOAD_HEADER,
         node,
         payload
+    )
+
+
+def create_dht_put(node, filename, file_key, provider):
+    return create_base_message(
+        MSG_DHT_PUT,
+        node,
+        {
+            "filename": filename,
+            "file_key": file_key,
+            "provider": provider,
+        }
+    )
+
+
+def create_dht_put_reply(node, filename, stored=True, reason=None):
+    return create_base_message(
+        MSG_DHT_PUT_REPLY,
+        node,
+        {
+            "filename": filename,
+            "stored": stored,
+            "reason": reason,
+        }
+    )
+
+
+def create_dht_get(node, filename, file_key, request_id):
+    return create_base_message(
+        MSG_DHT_GET,
+        node,
+        {
+            "filename": filename,
+            "file_key": file_key,
+            "request_id": request_id,
+        }
+    )
+
+
+def create_dht_get_reply(node, filename, request_id, providers):
+    return create_base_message(
+        MSG_DHT_GET_REPLY,
+        node,
+        {
+            "filename": filename,
+            "request_id": request_id,
+            "providers": providers,
+        }
     )
